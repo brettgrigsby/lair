@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lair - Villain vs Secret Agent</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+            position: fixed;
+            width: 100%;
+            height: 100%;
+        }
+        #game-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container"></div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.70.0/dist/phaser.min.js"></script>
+    <script type="module">
+        import { sdk } from 'https://esm.sh/@farcade/game-sdk@latest';
+        
+        // Game constants
+        const COLORS = {
+            background: 0x1a1a1a,
+            villain: 0x8b0000,
+            agent: 0x00008b,
+            highlight: 0xffd700,
+            text: 0xffffff,
+            buttonBg: 0x333333,
+            buttonHover: 0x555555,
+            sanctum: 0x6a0dad,
+            armory: 0xb22222,
+            workshop: 0x4682b4,
+            tortureChamber: 0x483d8b,
+            gridLine: 0x444444,
+            validPlacement: 0x00ff00,
+            invalidPlacement: 0xff0000
+        };
+        
+        // Game state
+        let gameData = {
+            players: [],
+            meId: null,
+            myRole: null,
+            opponentRole: null,
+            gameStarted: false,
+            lairLayout: {},
+            agentPosition: null,
+            villainTraps: [],
+            doomsdayDevice: null,
+            initialGameState: null,
+            selectedTile: null,
+            myTurn: true
+        };
+        
+        // Tile types
+        const TILE_TYPES = {
+            SANCTUM: 'sanctum',
+            ARMORY: 'armory',
+            WORKSHOP: 'workshop',
+            TORTURE_CHAMBER: 'tortureChamber'
+        };
+        
+        // Title Scene
+        class TitleScene extends Phaser.Scene {
+            constructor() {
+                super({ key: 'TitleScene' });
+            }
+            
+            create() {
+                // Check if role already assigned (opponent selected first)
+                if (gameData.myRole) {
+                    this.scene.start('GameScene');
+                    return;
+                }
+                // Background
+                this.cameras.main.setBackgroundColor(COLORS.background);
+                
+                const { width, height } = this.scale;
+                
+                // Title
+                const titleText = this.add.text(width / 2, height * 0.25, 'LAIR', {
+                    fontSize: Math.floor(Math.min(width, height) * 0.15) + 'px',
+                    fontStyle: 'bold',
+                    color: '#ffffff',
+                    stroke: '#000000',
+                    strokeThickness: 6
+                });
+                titleText.setOrigin(0.5);
+                
+                // Subtitle
+                const subtitleText = this.add.text(width / 2, height * 0.35, 'Villain vs Secret Agent', {
+                    fontSize: Math.floor(Math.min(width, height) * 0.05) + 'px',
+                    color: '#cccccc'
+                });
+                subtitleText.setOrigin(0.5);
+                
+                // Role selection prompt
+                const promptText = this.add.text(width / 2, height * 0.5, 'Choose Your Role:', {
+                    fontSize: Math.floor(Math.min(width, height) * 0.06) + 'px',
+                    color: '#ffffff'
+                });
+                promptText.setOrigin(0.5);
+                
+                // Villain button
+                const villainButton = this.createButton(width / 2, height * 0.65, 'VILLAIN', COLORS.villain);
+                villainButton.on('pointerdown', () => this.selectRole('villain'));
+                
+                // Agent button
+                const agentButton = this.createButton(width / 2, height * 0.8, 'SECRET AGENT', COLORS.agent);
+                agentButton.on('pointerdown', () => this.selectRole('agent'));
+                
+            }
+            
+            createButton(x, y, text, color) {
+                const button = this.add.container(x, y);
+                
+                const { width, height } = this.scale;
+                const buttonWidth = Math.min(width * 0.7, 300);
+                const buttonHeight = Math.min(height * 0.1, 80);
+                
+                const bg = this.add.rectangle(0, 0, buttonWidth, buttonHeight, COLORS.buttonBg);
+                bg.setStrokeStyle(3, color);
+                button.add(bg);
+                
+                const buttonText = this.add.text(0, 0, text, {
+                    fontSize: Math.floor(Math.min(width, height) * 0.05) + 'px',
+                    color: '#ffffff'
+                });
+                buttonText.setOrigin(0.5);
+                button.add(buttonText);
+                
+                button.setSize(buttonWidth, buttonHeight);
+                button.setInteractive();
+                
+                button.on('pointerover', () => {
+                    bg.setFillStyle(COLORS.buttonHover);
+                });
+                
+                button.on('pointerout', () => {
+                    bg.setFillStyle(COLORS.buttonBg);
+                });
+                
+                return button;
+            }
+            
+            selectRole(role) {
+                gameData.myRole = role;
+                gameData.opponentRole = role === 'villain' ? 'agent' : 'villain';
+                
+                // Send role selection to other player if they exist
+                if (gameData.players.length > 1) {
+                    const opponentId = gameData.players.find(p => p.id !== gameData.meId).id;
+                    sdk.multiplayer.actions.updateGameState({
+                        data: {
+                            type: 'roleSelected',
+                            playerId: gameData.meId,
+                            role: role
+                        },
+                        alertUserIds: [opponentId]
+                    });
+                }
+                
+                // Transition directly to game
+                this.scene.start('GameScene');
+                
+                // Trigger haptic feedback
+                sdk.multiplayer.actions.hapticFeedback();
+            }
+        }
+        
+        // Main Game Scene
+        class GameScene extends Phaser.Scene {
+            constructor() {
+                super({ key: 'GameScene' });
+                this.gridGroup = null;
+                this.tilesGroup = null;
+                this.selectionGroup = null;
+                this.previewTile = null;
+                this.validPlacements = [];
+            }
+            
+            create() {
+                this.cameras.main.setBackgroundColor(COLORS.background);
+                
+                const { width, height } = this.scale;
+                
+                // Initialize groups
+                this.gridGroup = this.add.group();
+                this.tilesGroup = this.add.group();
+                this.selectionGroup = this.add.group();
+                
+                // Calculate grid dimensions
+                this.gridSize = 40;
+                this.gridCols = Math.floor(width * 0.8 / this.gridSize);
+                this.gridRows = Math.floor(height * 0.5 / this.gridSize);
+                this.gridOffsetX = (width - this.gridCols * this.gridSize) / 2;
+                this.gridOffsetY = height * 0.2;
+                
+                // Role indicator
+                const roleText = this.add.text(width * 0.05, height * 0.02, `You are: ${gameData.myRole.toUpperCase()}`, {
+                    fontSize: Math.floor(Math.min(width, height) * 0.05) + 'px',
+                    color: gameData.myRole === 'villain' ? '#ff0000' : '#0000ff'
+                });
+                
+                // Turn indicator
+                this.turnText = this.add.text(width / 2, height * 0.1, gameData.myTurn ? 'Your Turn' : 'Opponent\'s Turn', {
+                    fontSize: Math.floor(Math.min(width, height) * 0.06) + 'px',
+                    color: gameData.myTurn ? '#ffff00' : '#888888'
+                });
+                this.turnText.setOrigin(0.5);
+                
+                if (gameData.myRole === 'villain') {
+                    this.setupVillainGameplay();
+                } else {
+                    this.setupAgentGameplay();
+                }
+            }
+            
+            setupVillainGameplay() {
+                const { width, height } = this.scale;
+                
+                // Create grid
+                this.createGrid();
+                
+                // Place sanctum at bottom center
+                const sanctumX = Math.floor(this.gridCols / 2);
+                const sanctumY = this.gridRows - 2;
+                this.placeTile(sanctumX, sanctumY, TILE_TYPES.SANCTUM);
+                
+                // Create tile selection UI
+                this.createTileSelection();
+                
+                // Enable grid interaction
+                this.enableGridInteraction();
+            }
+            
+            setupAgentGameplay() {
+                const { width, height } = this.scale;
+                
+                const exploreText = this.add.text(width / 2, height / 2, 'Waiting for villain to build...', {
+                    fontSize: Math.floor(Math.min(width, height) * 0.04) + 'px',
+                    color: '#888888'
+                });
+                exploreText.setOrigin(0.5);
+            }
+            
+            createGrid() {
+                for (let y = 0; y < this.gridRows; y++) {
+                    for (let x = 0; x < this.gridCols; x++) {
+                        const gridX = this.gridOffsetX + x * this.gridSize + this.gridSize / 2;
+                        const gridY = this.gridOffsetY + y * this.gridSize + this.gridSize / 2;
+                        
+                        const cell = this.add.rectangle(gridX, gridY, this.gridSize - 2, this.gridSize - 2, 0x000000, 0);
+                        cell.setStrokeStyle(1, COLORS.gridLine, 0.3);
+                        cell.gridX = x;
+                        cell.gridY = y;
+                        
+                        this.gridGroup.add(cell);
+                    }
+                }
+            }
+            
+            createTileSelection() {
+                const { width, height } = this.scale;
+                const selectionY = height * 0.85;
+                const tileWidth = width * 0.25;
+                const tileHeight = height * 0.1;
+                const spacing = width * 0.05;
+                
+                const tiles = [
+                    { type: TILE_TYPES.ARMORY, name: 'Armory', color: COLORS.armory },
+                    { type: TILE_TYPES.WORKSHOP, name: 'Workshop', color: COLORS.workshop },
+                    { type: TILE_TYPES.TORTURE_CHAMBER, name: 'Torture', color: COLORS.tortureChamber }
+                ];
+                
+                tiles.forEach((tile, index) => {
+                    const x = width / 2 + (index - 1) * (tileWidth + spacing);
+                    const container = this.add.container(x, selectionY);
+                    
+                    const bg = this.add.rectangle(0, 0, tileWidth, tileHeight, tile.color);
+                    bg.setStrokeStyle(2, COLORS.text);
+                    container.add(bg);
+                    
+                    const text = this.add.text(0, 0, tile.name, {
+                        fontSize: Math.floor(Math.min(width, height) * 0.04) + 'px',
+                        color: '#ffffff'
+                    });
+                    text.setOrigin(0.5);
+                    container.add(text);
+                    
+                    container.setSize(tileWidth, tileHeight);
+                    container.setInteractive();
+                    container.tileType = tile.type;
+                    
+                    container.on('pointerdown', () => {
+                        if (gameData.myTurn) {
+                            this.selectTile(tile.type);
+                        }
+                    });
+                    
+                    this.selectionGroup.add(container);
+                });
+            }
+            
+            selectTile(tileType) {
+                gameData.selectedTile = tileType;
+                
+                // Update selection highlight
+                this.selectionGroup.getChildren().forEach(container => {
+                    const bg = container.list[0];
+                    if (container.tileType === tileType) {
+                        bg.setStrokeStyle(4, COLORS.highlight);
+                    } else {
+                        bg.setStrokeStyle(2, COLORS.text);
+                    }
+                });
+                
+                // Update valid placements
+                this.updateValidPlacements();
+            }
+            
+            updateValidPlacements() {
+                this.validPlacements = [];
+                
+                // Find all adjacent positions to existing tiles
+                Object.keys(gameData.lairLayout).forEach(key => {
+                    const [x, y] = key.split(',').map(Number);
+                    const adjacents = [
+                        [x - 1, y], [x + 1, y],
+                        [x, y - 1], [x, y + 1]
+                    ];
+                    
+                    adjacents.forEach(([ax, ay]) => {
+                        if (ax >= 0 && ax < this.gridCols && 
+                            ay >= 0 && ay < this.gridRows &&
+                            !gameData.lairLayout[`${ax},${ay}`]) {
+                            this.validPlacements.push(`${ax},${ay}`);
+                        }
+                    });
+                });
+                
+                // Highlight valid placements
+                this.gridGroup.getChildren().forEach(cell => {
+                    const key = `${cell.gridX},${cell.gridY}`;
+                    if (this.validPlacements.includes(key)) {
+                        cell.setStrokeStyle(2, COLORS.validPlacement, 0.5);
+                    } else {
+                        cell.setStrokeStyle(1, COLORS.gridLine, 0.3);
+                    }
+                });
+            }
+            
+            enableGridInteraction() {
+                this.input.on('pointermove', (pointer) => {
+                    if (!gameData.myTurn || !gameData.selectedTile) return;
+                    
+                    const gridX = Math.floor((pointer.x - this.gridOffsetX) / this.gridSize);
+                    const gridY = Math.floor((pointer.y - this.gridOffsetY) / this.gridSize);
+                    
+                    if (gridX >= 0 && gridX < this.gridCols && gridY >= 0 && gridY < this.gridRows) {
+                        const key = `${gridX},${gridY}`;
+                        if (this.validPlacements.includes(key)) {
+                            this.showPreview(gridX, gridY);
+                        } else {
+                            this.hidePreview();
+                        }
+                    } else {
+                        this.hidePreview();
+                    }
+                });
+                
+                this.input.on('pointerdown', (pointer) => {
+                    if (!gameData.myTurn || !gameData.selectedTile) return;
+                    
+                    const gridX = Math.floor((pointer.x - this.gridOffsetX) / this.gridSize);
+                    const gridY = Math.floor((pointer.y - this.gridOffsetY) / this.gridSize);
+                    
+                    const key = `${gridX},${gridY}`;
+                    if (this.validPlacements.includes(key)) {
+                        this.placeTile(gridX, gridY, gameData.selectedTile);
+                        this.endTurn();
+                    }
+                });
+            }
+            
+            showPreview(x, y) {
+                this.hidePreview();
+                
+                const worldX = this.gridOffsetX + x * this.gridSize + this.gridSize / 2;
+                const worldY = this.gridOffsetY + y * this.gridSize + this.gridSize / 2;
+                
+                this.previewTile = this.add.rectangle(worldX, worldY, this.gridSize - 4, this.gridSize - 4, COLORS[gameData.selectedTile], 0.5);
+                this.previewTile.setStrokeStyle(2, COLORS[gameData.selectedTile]);
+            }
+            
+            hidePreview() {
+                if (this.previewTile) {
+                    this.previewTile.destroy();
+                    this.previewTile = null;
+                }
+            }
+            
+            placeTile(x, y, tileType) {
+                const worldX = this.gridOffsetX + x * this.gridSize + this.gridSize / 2;
+                const worldY = this.gridOffsetY + y * this.gridSize + this.gridSize / 2;
+                
+                const tile = this.add.rectangle(worldX, worldY, this.gridSize - 4, this.gridSize - 4, COLORS[tileType]);
+                tile.setStrokeStyle(2, COLORS.text);
+                
+                // Add tile to layout
+                gameData.lairLayout[`${x},${y}`] = tileType;
+                this.tilesGroup.add(tile);
+                
+                // Haptic feedback
+                sdk.multiplayer.actions.hapticFeedback();
+            }
+            
+            endTurn() {
+                gameData.myTurn = false;
+                gameData.selectedTile = null;
+                this.hidePreview();
+                
+                // Clear selection highlights
+                this.selectionGroup.getChildren().forEach(container => {
+                    const bg = container.list[0];
+                    bg.setStrokeStyle(2, COLORS.text);
+                });
+                
+                // Clear valid placement highlights
+                this.gridGroup.getChildren().forEach(cell => {
+                    cell.setStrokeStyle(1, COLORS.gridLine, 0.3);
+                });
+                
+                // Update turn text
+                this.turnText.setText('Opponent\'s Turn');
+                this.turnText.setColor('#888888');
+                
+                // Send update to opponent
+                if (gameData.players.length > 1) {
+                    const opponentId = gameData.players.find(p => p.id !== gameData.meId).id;
+                    sdk.multiplayer.actions.updateGameState({
+                        data: {
+                            type: 'tilePlaced',
+                            lairLayout: gameData.lairLayout,
+                            nextTurn: opponentId
+                        },
+                        alertUserIds: [opponentId]
+                    });
+                }
+            }
+        }
+        
+        // Phaser configuration
+        const config = {
+            type: Phaser.AUTO,
+            parent: 'game-container',
+            scene: [TitleScene, GameScene],
+            scale: {
+                mode: Phaser.Scale.RESIZE,
+                width: '100%',
+                height: '100%'
+            },
+            render: {
+                antialias: true
+            }
+        };
+        
+        // Initialize game
+        const game = new Phaser.Game(config);
+        
+        // Farcade SDK event listeners
+        sdk.on('game_info', (data) => {
+            console.log('Game info received:', data);
+            gameData.players = data.players;
+            gameData.meId = data.meId;
+            
+            // Check if there's an initial game state with role selection
+            if (gameData.initialGameState) {
+                const state = gameData.initialGameState;
+                if (state.type === 'roleSelected' && state.playerId !== gameData.meId) {
+                    // Opponent already selected a role, auto-assign opposite role
+                    gameData.opponentRole = state.role;
+                    gameData.myRole = state.role === 'villain' ? 'agent' : 'villain';
+                }
+            }
+        });
+        
+        sdk.on('game_state_updated', ({ id, data }) => {
+            console.log('Game state updated:', data);
+            
+            // Store initial state if we haven't received game_info yet
+            if (!gameData.meId && data.type === 'roleSelected') {
+                gameData.initialGameState = data;
+            }
+            
+            if (data.type === 'roleSelected' && data.playerId !== gameData.meId) {
+                // Opponent selected their role
+                gameData.opponentRole = data.role;
+                // If we haven't selected a role yet, assign us the opposite
+                if (!gameData.myRole) {
+                    gameData.myRole = data.role === 'villain' ? 'agent' : 'villain';
+                    
+                    // If we're in the title scene, transition to game
+                    if (game.scene.isActive('TitleScene')) {
+                        game.scene.stop('TitleScene');
+                        game.scene.start('GameScene');
+                        sdk.multiplayer.actions.hapticFeedback();
+                    }
+                }
+            }
+        });
+        
+        sdk.on('play_again', () => {
+            // Reset game state
+            gameData = {
+                players: gameData.players,
+                meId: gameData.meId,
+                myRole: null,
+                opponentRole: null,
+                gameStarted: false,
+                lairLayout: {},
+                agentPosition: null,
+                villainTraps: [],
+                doomsdayDevice: null,
+                initialGameState: null,
+                selectedTile: null,
+                myTurn: true
+            };
+            
+            // Return to title screen
+            game.scene.stop('GameScene');
+            game.scene.start('TitleScene');
+        });
+        
+        // Notify Farcade that game is ready
+        sdk.multiplayer.actions.ready();
+    </script>
+</body>
+</html>
